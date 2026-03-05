@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['G:\\claude\\SynologyDrive\\claude\\premproject_downloads_organiser\\main.py'],
+    ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['G:\\claude\\SynologyDrive\\claude\\premproject_downloads_organiser\\assets\\icon.ico'],
+    icon=['assets\\icon.ico'],
 )

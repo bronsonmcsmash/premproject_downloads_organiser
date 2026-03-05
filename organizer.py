@@ -204,9 +204,11 @@ def get_selected_files(
     """
     Return the files currently selected by the user.
 
-    Tries Directory Opus first (via dopusrt), then falls back to whatever
-    CF_HDROP data is already on the Windows clipboard (i.e., files the
-    user manually pressed Ctrl+C on).
+    Source priority:
+      1. Internet Download Manager — if IDM is the foreground window and has
+         a selected download whose file exists on disk.
+      2. Directory Opus — via dopusrt if available.
+      3. Clipboard fallback — CF_HDROP data already on the clipboard.
 
     Args:
         dopusrt_path: Path to dopusrt.exe.  If None, auto-detected.
@@ -215,6 +217,17 @@ def get_selected_files(
         Tuple of (file_paths, used_fallback).
         used_fallback is True when the clipboard-fallback path was taken.
     """
+    # ── 1. IDM ───────────────────────────────────────────────────────────
+    try:
+        from idm_source import get_idm_selected_file, is_idm_foreground
+        if is_idm_foreground():
+            idm_file = get_idm_selected_file()
+            if idm_file:
+                return [idm_file], False
+    except Exception:
+        pass
+
+    # ── 2. Directory Opus ────────────────────────────────────────────────
     if dopusrt_path is None:
         dopusrt_path = find_dopusrt()
 
@@ -226,7 +239,7 @@ def get_selected_files(
         except Exception:
             pass
 
-    # Fallback: read whatever is currently on the clipboard.
+    # ── 3. Clipboard fallback ────────────────────────────────────────────
     return _read_clipboard_hdrop(), True
 
 

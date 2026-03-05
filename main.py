@@ -424,5 +424,22 @@ class ProjectOrganizer:
 # Bootstrap
 # ---------------------------------------------------------------------------
 
+def _acquire_single_instance_mutex() -> object:
+    """
+    Create a named Windows mutex to prevent multiple instances.
+    Returns the mutex handle (must stay alive for the process lifetime).
+    Exits immediately if another instance already holds the mutex.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    ERROR_ALREADY_EXISTS = 183
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, f"Global\\{APP_NAME}SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        sys.exit(0)
+    return mutex
+
+
 if __name__ == "__main__":
+    _mutex = _acquire_single_instance_mutex()
     ProjectOrganizer().run()
