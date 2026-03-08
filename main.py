@@ -23,9 +23,11 @@ from typing import Optional
 
 import keyboard
 import pystray
+import win32gui
 
 import notifications
 from config import load_config, save_config
+from drop_zone import DropZoneWindow
 from icon import create_tray_icon, save_icon_ico
 from notifications import show_toast
 from organizer import find_dopusrt, get_selected_files, organise_files
@@ -108,10 +110,12 @@ class ProjectOrganizer:
         self.config: dict = load_config()
         self.tray: Optional[pystray.Icon] = None
 
-        self._dopusrt:             Optional[str] = find_dopusrt()
-        self._hotkey_handler                     = None    # return value of keyboard.add_hotkey
-        self._fallback_warned:     bool          = False
-        self._settings_open:       bool          = False   # guard against double-open
+        self._dopusrt:               Optional[str] = find_dopusrt()
+        self._hotkey_handler                       = None    # return value of keyboard.add_hotkey
+        self._set_proj_hotkey_handler              = None    # Ctrl+Shift+P handler
+        self._fallback_warned:       bool          = False
+        self._settings_open:         bool          = False   # guard against double-open
+        self._drop_zone: Optional[DropZoneWindow]  = None
 
     # ------------------------------------------------------------------
     # Icon initialisation
@@ -150,6 +154,13 @@ class ProjectOrganizer:
         proj_label  = Path(folder).name if folder else "Not set"
 
         return pystray.Menu(
+            # Hidden default item — pystray triggers this on left-click (Windows).
+            pystray.MenuItem(
+                "Toggle Drop Zone",
+                self._menu_toggle_drop_zone,
+                default=True,
+                visible=False,
+            ),
             pystray.MenuItem(
                 f"Active Project: {proj_label}",
                 action=None,
@@ -201,6 +212,27 @@ class ProjectOrganizer:
                 f"⚠️ Could not register hotkey '{hotkey}': {exc}",
             )
 
+        # Ctrl+Alt+Shift+P is always registered (separate from the user hotkey).
+        if self._set_proj_hotkey_handler is None:
+            try:
+                def _set_proj_hotkey():
+                    # Capture foreground window synchronously on the keyboard thread
+                    # before spawning a new thread, so focus hasn't shifted yet.
+                    try:
+                        hwnd = win32gui.GetForegroundWindow()
+                    except Exception:
+                        hwnd = None
+                    threading.Thread(
+                        target=self._set_project_from_current_folder,
+                        args=(hwnd,),
+                        daemon=True,
+                    ).start()
+                self._set_proj_hotkey_handler = keyboard.add_hotkey(
+                    "ctrl+alt+shift+p", _set_proj_hotkey,
+                )
+            except Exception:
+                pass
+
     def _hotkey_callback(self) -> None:
         """
         Called by the keyboard library when the hotkey fires.
@@ -209,6 +241,94 @@ class ProjectOrganizer:
         listener is never blocked.
         """
         threading.Thread(target=self._run_organiser, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Set-project helpers (drop zone + Ctrl+Shift+P)
+    # ------------------------------------------------------------------
+
+    def _on_folder_selected(self, path: str) -> None:
+        """Shared handler: persist a new project folder and notify the user."""
+        self.config["project_folder"] = path
+        save_config(self.config)
+        self._refresh_menu()
+        show_toast("Project Organizer", f"✅ Project set to: {Path(path).name}")
+
+    def _get_dopus_current_folder(self, hwnd: Optional[int] = None) -> Optional[str]:
+        """
+        Return the folder currently open in the most-recently-active Directory Opus
+        lister by enumerating all visible top-level windows in Z-order.
+
+        DOpus lister windows use class 'dopus.lister' and their window title IS
+        the current folder path directly (e.g. 'H:\\MyProject') — no suffix.
+        """
+        dopus_windows: list = []  # [(hwnd, folder_path), ...]
+
+        def _enum_cb(h: int, _) -> bool:
+            if not win32gui.IsWindowVisible(h):
+                return True
+            try:
+                cls = win32gui.GetClassName(h)
+            except Exception:
+                return True
+
+            if cls != "dopus.lister":
+                return True
+
+            try:
+                title = win32gui.GetWindowText(h)
+            except Exception:
+                return True
+
+            if title and os.path.isdir(title):
+                dopus_windows.append((h, title))
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_cb, None)
+        except Exception:
+            return None
+
+        if not dopus_windows:
+            return None
+
+        # Prefer the foreground DOpus window captured before the hotkey shifted focus.
+        if hwnd:
+            for h, path in dopus_windows:
+                if h == hwnd:
+                    return path
+
+        # EnumWindows yields windows in Z-order (topmost first), so index 0 is
+        # the most-recently-active DOpus lister even if focus has already shifted.
+        return dopus_windows[0][1]
+
+    def _set_project_from_current_folder(self, hwnd: Optional[int] = None) -> None:
+        """
+        Ctrl+Alt+Shift+P handler: detect the active DOpus folder and set it as
+        the project.  Falls back to a folder-picker dialog if DOpus is not
+        the foreground window or the path cannot be parsed.
+        """
+        path = self._get_dopus_current_folder(hwnd)
+        if path:
+            self._on_folder_selected(path)
+            return
+        # Fallback: open a native folder-chooser dialog.
+        threading.Thread(target=self._pick_and_set_folder, daemon=True).start()
+
+    def _pick_and_set_folder(self) -> None:
+        """Open a native folder-chooser and set the chosen folder as the project."""
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        chosen = filedialog.askdirectory(
+            parent=root,
+            title="Select Active Project Folder",
+        )
+        root.destroy()
+        if chosen:
+            self._on_folder_selected(chosen)
 
     # ------------------------------------------------------------------
     # Core organise workflow
@@ -322,31 +442,11 @@ class ProjectOrganizer:
 
     def _menu_change_folder(self, _icon=None, _item=None) -> None:
         """Quick folder-picker accessible directly from the tray menu."""
-        def _pick():
-            import tkinter as tk
-            from tkinter import filedialog
+        threading.Thread(target=self._pick_and_set_folder, daemon=True).start()
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            root.lift()
-
-            chosen = filedialog.askdirectory(
-                parent=root,
-                title="Select Active Project Folder",
-            )
-            root.destroy()
-
-            if chosen:
-                self.config["project_folder"] = chosen
-                save_config(self.config)
-                self._refresh_menu()
-                show_toast(
-                    "Project Organizer",
-                    f"✅ Project folder set to: {Path(chosen).name}",
-                )
-
-        threading.Thread(target=_pick, daemon=True).start()
+    def _menu_toggle_drop_zone(self, _icon=None, _item=None) -> None:
+        """Show or hide the floating drag-and-drop zone window."""
+        self._drop_zone.toggle()
 
     def _menu_open_settings(self, _icon=None, _item=None) -> None:
         """Launch the Settings window from the tray menu."""
@@ -385,6 +485,8 @@ class ProjectOrganizer:
     def _menu_quit(self, _icon=None, _item=None) -> None:
         """Shut down cleanly: unhook all keys and stop the tray."""
         keyboard.unhook_all()
+        if self._drop_zone:
+            self._drop_zone.hide()
         if self.tray:
             self.tray.stop()
 
@@ -414,6 +516,11 @@ class ProjectOrganizer:
                 "No project folder set. Right-click the tray icon to get started.",
                 duration="long",
             )
+
+        # Drop zone (created now, shown only when user requests it)
+        self._drop_zone = DropZoneWindow(
+            on_folder_dropped=lambda p: self._on_folder_selected(p)
+        )
 
         # Tray icon
         self.tray = self._init_icon()
