@@ -100,3 +100,18 @@ def open_folder_in_explorer(folder_path: str) -> None:
     path = Path(folder_path)
     if path.exists():
         subprocess.Popen(["explorer", str(path)])
+
+
+def open_folder_in_dopus(folder_path: str, dopusrt_path: str) -> None:
+    """
+    Open a folder in a new Directory Opus lister.
+
+    Args:
+        folder_path:  Absolute path to the directory.
+        dopusrt_path: Full path to dopusrt.exe.
+    """
+    path = Path(folder_path)
+    if not (path.exists() and dopusrt_path):
+        return
+    dopus_exe = Path(dopusrt_path).parent / "dopus.exe"
+    subprocess.Popen([str(dopus_exe), str(path)])
