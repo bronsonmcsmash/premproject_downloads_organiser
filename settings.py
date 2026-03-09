@@ -21,7 +21,8 @@ from typing import Callable, Dict
 
 from organizer import FILE_TYPES
 
-DEFAULT_HOTKEY = "ctrl+shift+c"
+DEFAULT_HOTKEY             = "ctrl+shift+c"
+DEFAULT_SET_PROJECT_HOTKEY = "ctrl+shift+p"
 
 # Modifier key keysym names — pressed alone these should not finalize a combo.
 _MODIFIER_KEYSYMS = frozenset({
@@ -46,7 +47,8 @@ class SettingsWindow:
     def __init__(self, config: Dict, on_save: Callable[[Dict], None]) -> None:
         self._saved_config = config.copy()
         self._on_save = on_save
-        self._capturing = False       # True while waiting for a key combo
+        self._capturing_entry = None  # widget currently in capture mode (or None)
+        self._capturing_var   = None  # StringVar being captured (or None)
         self._label_vars: Dict[str, tk.StringVar] = {}
 
         self.root = tk.Tk()
@@ -93,14 +95,14 @@ class SettingsWindow:
             f_folder, text="Browse…", command=self._browse_folder
         ).grid(row=0, column=1, **frame_pad)
 
-        # ── Keyboard Shortcut ─────────────────────────────────────────────
-        f_key = tk.LabelFrame(self.root, text="Keyboard Shortcut", **outer_pad)
+        # ── Keyboard Shortcuts ────────────────────────────────────────────
+        f_key = tk.LabelFrame(self.root, text="Keyboard Shortcuts", **outer_pad)
         f_key.grid(row=1, column=0, sticky="ew", **outer_pad)
 
-        tk.Label(f_key, text="Shortcut:").grid(
+        # Row 0 — Import Files shortcut
+        tk.Label(f_key, text="Import Files:").grid(
             row=0, column=0, **frame_pad, sticky="w"
         )
-
         self._hotkey_var = tk.StringVar(
             value=self._saved_config.get("hotkey", DEFAULT_HOTKEY)
         )
@@ -110,19 +112,54 @@ class SettingsWindow:
             readonlybackground="#f0f8ff", cursor="hand2",
         )
         self._hotkey_entry.grid(row=0, column=1, **frame_pad)
-        self._hotkey_entry.bind("<Button-1>", self._start_capture)
-        self._hotkey_entry.bind("<KeyPress>",  self._on_key_press)
-        self._hotkey_entry.bind("<FocusOut>",  self._stop_capture)
-
+        self._hotkey_entry.bind(
+            "<Button-1>",
+            lambda e: self._start_capture(self._hotkey_entry, self._hotkey_var),
+        )
+        self._hotkey_entry.bind("<KeyPress>", self._on_key_press)
+        self._hotkey_entry.bind("<FocusOut>", self._stop_capture)
         tk.Button(
-            f_key, text="Reset to Default", command=self._reset_hotkey
+            f_key, text="Reset",
+            command=lambda: self._reset_entry(
+                self._hotkey_entry, self._hotkey_var, DEFAULT_HOTKEY
+            ),
         ).grid(row=0, column=2, **frame_pad)
+
+        # Row 1 — Set Project shortcut
+        tk.Label(f_key, text="Set Project:").grid(
+            row=1, column=0, **frame_pad, sticky="w"
+        )
+        self._set_proj_hotkey_var = tk.StringVar(
+            value=self._saved_config.get("set_project_hotkey", DEFAULT_SET_PROJECT_HOTKEY)
+        )
+        self._set_proj_hotkey_entry = tk.Entry(
+            f_key, textvariable=self._set_proj_hotkey_var,
+            width=22, state="readonly",
+            readonlybackground="#f0f8ff", cursor="hand2",
+        )
+        self._set_proj_hotkey_entry.grid(row=1, column=1, **frame_pad)
+        self._set_proj_hotkey_entry.bind(
+            "<Button-1>",
+            lambda e: self._start_capture(
+                self._set_proj_hotkey_entry, self._set_proj_hotkey_var
+            ),
+        )
+        self._set_proj_hotkey_entry.bind("<KeyPress>", self._on_key_press)
+        self._set_proj_hotkey_entry.bind("<FocusOut>", self._stop_capture)
+        tk.Button(
+            f_key, text="Reset",
+            command=lambda: self._reset_entry(
+                self._set_proj_hotkey_entry,
+                self._set_proj_hotkey_var,
+                DEFAULT_SET_PROJECT_HOTKEY,
+            ),
+        ).grid(row=1, column=2, **frame_pad)
 
         tk.Label(
             f_key,
-            text="Click the box, then press your desired key combination.",
+            text="Click a box, then press your desired key combination.",
             fg="grey", font=("TkDefaultFont", 8),
-        ).grid(row=1, column=0, columnspan=3, padx=8, sticky="w")
+        ).grid(row=2, column=0, columnspan=3, padx=8, sticky="w")
 
         # ── File Mode ─────────────────────────────────────────────────────
         f_mode = tk.LabelFrame(self.root, text="File Mode", **outer_pad)
@@ -139,6 +176,26 @@ class SettingsWindow:
             f_mode, text="Move  (original files are removed after copying)",
             variable=self._mode_var, value="move",
         ).grid(row=1, column=0, **frame_pad, sticky="w")
+
+        # Derive default: migrate old bool config if present
+        _old_bool = self._saved_config.get("auto_open_folder", False)
+        _default_mode = self._saved_config.get(
+            "auto_open_mode", "explorer" if _old_bool else "none"
+        )
+        self._auto_open_mode_var = tk.StringVar(value=_default_mode)
+
+        tk.Label(f_mode, text="After organising:").grid(
+            row=2, column=0, padx=(8, 4), pady=(6, 2), sticky="w"
+        )
+        for row_offset, (label, value) in enumerate([
+            ("Don't auto-open  (toast shows Open Folder button)", "none"),
+            ("Open in Explorer",                                   "explorer"),
+            ("Open in Directory Opus",                             "dopus"),
+        ]):
+            tk.Radiobutton(
+                f_mode, text=label,
+                variable=self._auto_open_mode_var, value=value,
+            ).grid(row=3 + row_offset, column=0, padx=(24, 8), pady=1, sticky="w")
 
         # ── Duplicate Handling ────────────────────────────────────────────
         f_dup = tk.LabelFrame(self.root, text="Duplicate Handling", **outer_pad)
@@ -229,33 +286,39 @@ class SettingsWindow:
     # Hotkey capture
     # ------------------------------------------------------------------
 
-    def _start_capture(self, _event=None) -> None:
-        """Begin capturing a new keyboard shortcut."""
-        self._capturing = True
-        self._hotkey_var.set("Press your shortcut now…")
-        self._hotkey_entry.config(readonlybackground="#fffde7")
-        self._hotkey_entry.focus_set()
+    def _start_capture(self, entry: tk.Entry, var: tk.StringVar) -> None:
+        """Begin capturing a new keyboard shortcut for the given entry."""
+        self._capturing_entry = entry
+        self._capturing_var   = var
+        var.set("Press your shortcut now…")
+        entry.config(readonlybackground="#fffde7")
+        entry.focus_set()
 
     def _stop_capture(self, _event=None) -> None:
         """Cancel capture mode; restore the previous value if nothing was set."""
-        if self._capturing:
-            self._capturing = False
-            current = self._hotkey_var.get()
-            if current == "Press your shortcut now…":
-                self._hotkey_var.set(
-                    self._saved_config.get("hotkey", DEFAULT_HOTKEY)
-                )
-            self._hotkey_entry.config(readonlybackground="#f0f8ff")
+        if self._capturing_entry is None:
+            return
+        entry = self._capturing_entry
+        var   = self._capturing_var
+        self._capturing_entry = None
+        self._capturing_var   = None
+        if var.get() == "Press your shortcut now…":
+            # Work out which default to restore.
+            if entry is self._hotkey_entry:
+                var.set(self._saved_config.get("hotkey", DEFAULT_HOTKEY))
+            else:
+                var.set(self._saved_config.get("set_project_hotkey", DEFAULT_SET_PROJECT_HOTKEY))
+        entry.config(readonlybackground="#f0f8ff")
 
     def _on_key_press(self, event: tk.Event) -> str:
         """
-        Capture the key combination when the user presses a key while the
+        Capture the key combination when the user presses a key while an
         entry widget is focused in capture mode.
 
         Modifier-only presses (Ctrl, Shift, Alt alone) are ignored until a
         non-modifier key is also pressed.
         """
-        if not self._capturing:
+        if self._capturing_entry is None:
             return "break"
 
         keysym = event.keysym.lower()
@@ -267,30 +330,33 @@ class SettingsWindow:
         parts: list = []
 
         # event.state bitmasks on Windows (tkinter):
-        #   0x0001 = Shift
-        #   0x0004 = Control
-        #   0x0008 = Mod1  (Alt on most Windows systems)
-        #   0x0080 = Mod4  (sometimes Win key)
+        #   0x0001  = Shift
+        #   0x0004  = Control
+        #   0x0008  = NumLock (NOT Alt on Windows — common gotcha)
+        #   0x20000 = Alt
         if event.state & 0x0004:
             parts.append("ctrl")
         if event.state & 0x0001:
             parts.append("shift")
-        if event.state & 0x0008:
+        if event.state & 0x20000:
             parts.append("alt")
 
         parts.append(keysym)
         combo = "+".join(parts)
 
-        self._hotkey_var.set(combo)
-        self._capturing = False
-        self._hotkey_entry.config(readonlybackground="#e8f5e9")
+        self._capturing_var.set(combo)
+        self._capturing_entry.config(readonlybackground="#e8f5e9")
+        self._capturing_entry = None
+        self._capturing_var   = None
         return "break"
 
-    def _reset_hotkey(self) -> None:
-        """Reset the shortcut entry to the application default."""
-        self._hotkey_var.set(DEFAULT_HOTKEY)
-        self._capturing = False
-        self._hotkey_entry.config(readonlybackground="#f0f8ff")
+    def _reset_entry(self, entry: tk.Entry, var: tk.StringVar, default: str) -> None:
+        """Reset a shortcut entry to its default value."""
+        var.set(default)
+        if self._capturing_entry is entry:
+            self._capturing_entry = None
+            self._capturing_var   = None
+        entry.config(readonlybackground="#f0f8ff")
 
     # ------------------------------------------------------------------
     # Folder browser
@@ -320,11 +386,13 @@ class SettingsWindow:
         new_config = {
             "project_folder":      self._folder_var.get(),
             "hotkey":              self._hotkey_var.get(),
+            "set_project_hotkey":  self._set_proj_hotkey_var.get(),
             "mode":                self._mode_var.get(),
             "overwrite_duplicates": self._overwrite_var.get(),
             "file_type_labels":    labels,
             "use_subfolders":      self._use_subfolders_var.get(),
             "use_date_folder":     self._use_date_var.get(),
+            "auto_open_mode":      self._auto_open_mode_var.get(),
         }
         self._on_save(new_config)
         self.root.destroy()

@@ -29,7 +29,7 @@ import notifications
 from config import load_config, save_config
 from drop_zone import DropZoneWindow
 from icon import create_tray_icon, save_icon_ico
-from notifications import show_toast
+from notifications import open_folder_in_dopus, open_folder_in_explorer, show_toast
 from organizer import find_dopusrt, get_selected_files, organise_files
 from progress_window import ProgressWindow
 from settings import SettingsWindow
@@ -212,26 +212,36 @@ class ProjectOrganizer:
                 f"⚠️ Could not register hotkey '{hotkey}': {exc}",
             )
 
-        # Ctrl+Alt+Shift+P is always registered (separate from the user hotkey).
-        if self._set_proj_hotkey_handler is None:
+        # Set-project hotkey — configurable, defaults to ctrl+alt+shift+p.
+        if self._set_proj_hotkey_handler is not None:
             try:
-                def _set_proj_hotkey():
-                    # Capture foreground window synchronously on the keyboard thread
-                    # before spawning a new thread, so focus hasn't shifted yet.
-                    try:
-                        hwnd = win32gui.GetForegroundWindow()
-                    except Exception:
-                        hwnd = None
-                    threading.Thread(
-                        target=self._set_project_from_current_folder,
-                        args=(hwnd,),
-                        daemon=True,
-                    ).start()
-                self._set_proj_hotkey_handler = keyboard.add_hotkey(
-                    "ctrl+alt+shift+p", _set_proj_hotkey,
-                )
-            except Exception:
+                keyboard.remove_hotkey(self._set_proj_hotkey_handler)
+            except (KeyError, ValueError):
                 pass
+            self._set_proj_hotkey_handler = None
+
+        set_proj_hotkey = self.config.get("set_project_hotkey", "ctrl+shift+p")
+        try:
+            def _set_proj_hotkey():
+                # Capture foreground window synchronously on the keyboard thread
+                # before spawning a new thread, so focus hasn't shifted yet.
+                try:
+                    hwnd = win32gui.GetForegroundWindow()
+                except Exception:
+                    hwnd = None
+                threading.Thread(
+                    target=self._set_project_from_current_folder,
+                    args=(hwnd,),
+                    daemon=True,
+                ).start()
+            self._set_proj_hotkey_handler = keyboard.add_hotkey(
+                set_proj_hotkey, _set_proj_hotkey,
+            )
+        except Exception as exc:
+            show_toast(
+                "Project Organizer",
+                f"⚠️ Could not register set-project hotkey '{set_proj_hotkey}': {exc}",
+            )
 
     def _hotkey_callback(self) -> None:
         """
@@ -428,11 +438,20 @@ class ProjectOrganizer:
 
         if success > 0:
             label = "file" if success == 1 else "files"
+            # Migrate old bool config if present
+            mode = self.config.get("auto_open_mode") or (
+                "explorer" if self.config.get("auto_open_folder") else "none"
+            )
             show_toast(
                 "Project Organizer",
                 f"✅ {success} {label} {action} to {proj_name}",
-                open_folder=last_dir,
+                open_folder=last_dir if mode == "none" else "",
             )
+            if last_dir:
+                if mode == "explorer":
+                    open_folder_in_explorer(last_dir)
+                elif mode == "dopus":
+                    open_folder_in_dopus(last_dir, self._dopusrt or "")
         elif not errors:
             show_toast("Project Organizer", "⚠️ No files were processed.")
 
@@ -468,18 +487,14 @@ class ProjectOrganizer:
 
     def _on_settings_saved(self, new_config: dict) -> None:
         """
-        Persist updated settings and re-register the hotkey if it changed.
+        Persist updated settings and re-register hotkeys.
 
         Args:
             new_config: The complete config dict returned by the settings window.
         """
-        old_hotkey = self.config.get("hotkey")
         self.config.update(new_config)
         save_config(self.config)
-
-        if new_config.get("hotkey") != old_hotkey:
-            self._register_hotkey()
-
+        self._register_hotkey()
         self._refresh_menu()
 
     def _menu_quit(self, _icon=None, _item=None) -> None:

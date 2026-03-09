@@ -3,3 +3,4 @@ Pillow
 keyboard
 pywin32
 winotify
+tkinterdnd2
